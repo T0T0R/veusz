@@ -21,12 +21,14 @@
 import numpy as N
 
 from .. import qtall as qt
+from .. import datasets
 from .. import document
 from .. import setting
 from .. import utils
 
 from . import pickable
 from .plotters import GenericPlotter
+from . import PointPlotter
 
 def _(text, disambiguation=None, context='Function'):
     """Translate text."""
@@ -76,6 +78,12 @@ class FunctionPlotter(GenericPlotter):
             descr=_('Maximum value at which to plot function'),
             usertext=_('Max')))
 
+        s.add( setting.WidgetChoice(    #***********************************************
+            'dataForFillBetween', '',
+            descr=_('Data up to which the plot is filled'),
+            widgettypes=('function','xy', 'fit'),
+            usertext=_('Fill up to')), 5 )
+
         s.add( setting.Line(
             'Line',
             descr=_('Function line settings'),
@@ -93,6 +101,11 @@ class FunctionPlotter(GenericPlotter):
             descr=_('Fill mode above/right function'),
             usertext=_('Fill above')),
             pixmap='settings_plotfillabove' )
+        s.add( setting.PlotterFill( #*************************************
+            'FillBetween',
+            descr=_('Fill mode between functions'),
+            usertext=_('Fill between')),
+            pixmap='settings_plotfillbetween' )
 
     @classmethod
     def addSettingsCompatLevel(klass, s, level):
@@ -101,6 +114,8 @@ class FunctionPlotter(GenericPlotter):
                 setting.Reference('../color') )
             s.FillAbove.get('color').newDefault(
                 setting.Reference('../color') )
+            s.FillBetween.get('color').newDefault(
+                setting.Reference('../color') ) #*********************
 
     @property
     def userdescription(self):
@@ -190,7 +205,7 @@ class FunctionPlotter(GenericPlotter):
         if len(finitevals) > 0:
             axrange[0] = min(N.min(finitevals), axrange[0])
             axrange[1] = max(N.max(finitevals), axrange[1])
-
+        
     def _plotLine(self, painter, xpts, ypts, bounds, clip):
         """ Plot the points in xpts, ypts."""
         x1, y1, x2, y2 = bounds
@@ -269,6 +284,23 @@ class FunctionPlotter(GenericPlotter):
         path = qt.QPainterPath()
         path.addPolygon(clipped)
         utils.brushExtFillPath(painter, brush, path)
+
+    def _fillRegionBetween(self, painter, pxpts, pypts, clip, brush):
+        """Fill the region enclosed by the points."""
+        # Test arrays
+        #pxpts = N.array([100, 110, 120, 130, 140])
+        #pypts = N.array([100, 120, 100, 80, 90])
+
+        pts = qt.QPolygonF()
+        utils.addNumpyToPolygonF(pts, pxpts, pypts)
+        # draw the clipped polygon
+        clipped = qt.QPolygonF()
+        utils.polygonClip(pts, clip, clipped)
+        path = qt.QPainterPath()
+        path.addPolygon(clipped)
+        utils.brushExtFillPath(painter, brush, path)
+
+
 
     def drawKeySymbol(self, number, painter, x, y, width, height):
         """Draw the plot symbol and/or line."""
@@ -414,6 +446,77 @@ class FunctionPlotter(GenericPlotter):
             if not s.FillAbove.hide:
                 self._fillRegion(
                     painter, pxpts, pypts, posn, False, cliprect, s.FillAbove)
+            
+            if not s.FillBetween.hide:#**************************************************
+                otherDataWidget = s.get('dataForFillBetween').findWidget()
+
+                if isinstance(otherDataWidget, FunctionPlotter):
+                    other_axes = otherDataWidget.fetchAxes()
+                    (xpts_b, ypts_b), (pxpts_b, pypts_b) = otherDataWidget.calcFunctionPoints(other_axes, posn)
+
+                    # The region to fill is defined by the point of the other object,
+                    # then coming round with the points of this object, back
+                    # to the beginning.
+                    pxpts = N.concatenate((pxpts_b, N.flip(pxpts)))
+                    pypts = N.concatenate((pypts_b, N.flip(pypts)))
+                    
+                    self._fillRegionBetween(
+                        painter, pxpts, pypts, cliprect, s.FillBetween)
+                
+                if isinstance(otherDataWidget, PointPlotter):
+                    other_s = otherDataWidget.settings
+                    doc = self.document
+                    other_xv = other_s.get('xData').getData(doc)
+                    other_yv = other_s.get('yData').getData(doc)
+                    other_text = other_s.get('labels').getData(doc, checknull=True)
+                    other_scalepoints = other_s.get('scalePoints').getData(doc)
+                    other_colorpoints = other_s.Color.get('points').getData(doc)
+                    other_axes = otherDataWidget.fetchAxes()
+
+
+                    # Code adapted from PointPlotter.dataDraw
+                    nanbreak = other_s.nanHandling == 'break-on'
+
+                    for other_xvals, other_yvals, other_tvals, other_ptvals, other_cvals in (
+                        datasets.generateValidDatasetParts(
+                            [other_xv, other_yv, other_text, other_scalepoints, other_colorpoints],
+                            breakds=nanbreak)):
+
+                        # Get line points from the other object    
+                        if other_axes == None:
+                            continue
+                        xplotter = other_axes[0].dataToPlotterCoords(posn, other_xvals.data)
+                        yplotter = other_axes[1].dataToPlotterCoords(posn, other_yvals.data)
+
+                        other_pts = otherDataWidget._getLinePoints(xplotter, yplotter, posn, other_xvals, other_yvals)
+                        nb_val = len(other_pts)
+                        if nb_val < 2:
+                            continue
+
+                        # get equally spaced coordinates along axis
+                        # code adapted from self.getIndependentPoints
+                        minval, maxval = other_xvals.data[0], other_xvals.data[-1]
+                        Nb = s.steps
+                        fnct_x_range = N.arange(Nb) * ((maxval-minval) / (Nb-1)) + minval
+                        
+                        # and convert them into plotter coords to obtain the points from
+                        # this function object.
+                        # code adapted from self.calcFunctionPoints  
+                        other_xvals_px = axes[0].dataToPlotterCoords(posn, fnct_x_range)
+                        local_dpts, local_pdpts = self.calcDependentPoints(fnct_x_range, axes, posn)
+                        if self.settings.variable == 'x':
+                            utils.addNumpyToPolygonF(other_pts, N.flip(other_xvals_px), N.flip(local_pdpts))
+                        else:
+                            utils.addNumpyToPolygonF(other_pts, N.flip(local_pdpts), N.flip(local_pdpts))
+
+
+                        # draw the clipped polygon
+                        # code from self._fillRegion
+                        clipped = qt.QPolygonF()
+                        utils.polygonClip(other_pts, cliprect, clipped)
+                        path = qt.QPainterPath()
+                        path.addPolygon(clipped)
+                        utils.brushExtFillPath(painter, s.FillBetween, path)
 
             if not s.Line.hide:
                 painter.setBrush( qt.QBrush() )

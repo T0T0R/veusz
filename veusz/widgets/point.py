@@ -322,6 +322,12 @@ def fillPtsToEdge(painter, pts, posn, cliprect, fillstyle):
 
     utils.brushExtFillPolygon(painter, fillstyle, cliprect, polypts)
 
+def fillPtsBetween(painter, pts_a, pts_b, posn, cliprect, fillstyle): #************************
+    polypts = qt.QPolygonF(pts_a)
+    polypts += pts_b
+
+    utils.brushExtFillPolygon(painter, fillstyle, cliprect, polypts)
+
 class MarkerFillBrush(setting.Brush):
     def __init__(self, name, **args):
         setting.Brush.__init__(self, name, **args)
@@ -378,6 +384,13 @@ class PointPlotter(GenericPlotter):
                 ' or list of values'),
             usertext=_('Scale markers')), 7 )
         s.add( setting.DataColor('Color'), 8 )
+
+        s.add( setting.WidgetChoice(    #***********************************************
+            'dataForFillBetween', '',
+            descr=_('Data up to which the plot is filled'),
+            widgettypes=('xy'),
+            usertext=_('Fill up to')), 5 )
+
         s.add( setting.Choice(
             'nanHandling',
             ('break-on', 'ignore'),
@@ -462,6 +475,11 @@ class PointPlotter(GenericPlotter):
             descr=_('Fill 2'),
             usertext=_('Fill 2')),
             pixmap='settings_plotfillabove' )
+        s.add( setting.PointFill( #*************************************
+            'FillBetween',
+            descr=_('Fill mode between functions'),
+            usertext=_('Fill between')),
+            pixmap='settings_plotfillbetween' )
         s.add( setting.PointLabel(
             'Label',
             descr=_('Label settings'),
@@ -475,6 +493,8 @@ class PointPlotter(GenericPlotter):
                 setting.Reference('../color') )
             s.FillAbove.get('color').newDefault(
                 setting.Reference('../color') )
+            s.FillBetween.get('color').newDefault(
+                setting.Reference('../color') ) #*********************
             s.MarkerFill.get('newMarkerSizes').newDefault(True)
 
     @property
@@ -712,6 +732,52 @@ class PointPlotter(GenericPlotter):
         for fillstyle in s.FillBelow, s.FillAbove:
             if not fillstyle.hide:
                 fillPtsToEdge(painter, pts, posn, cliprect, fillstyle)
+        
+        if not s.FillBetween.hide and s.get('dataForFillBetween').findWidget() != None:  #**************************************************
+            otherDataWidget = s.get('dataForFillBetween').findWidget()
+            other_s = otherDataWidget.settings
+            doc = self.document
+            other_xv = other_s.get('xData').getData(doc)
+            other_yv = other_s.get('yData').getData(doc)
+            other_text = other_s.get('labels').getData(doc, checknull=True)
+            other_scalepoints = other_s.get('scalePoints').getData(doc)
+            other_colorpoints = other_s.Color.get('points').getData(doc)
+            other_axes = otherDataWidget.fetchAxes()
+
+            # Code adapted from self.dataDraw
+            nanbreak = other_s.nanHandling == 'break-on'
+
+            for other_xvals, other_yvals, other_tvals, other_ptvals, other_cvals in (
+                datasets.generateValidDatasetParts(
+                    [other_xv, other_yv, other_text, other_scalepoints, other_colorpoints],
+                    breakds=nanbreak)):
+                
+                if other_axes == None:
+                    continue
+
+                # Extract the x-values in the other data that are
+                # common to the current x-range.
+                other_xdata = other_xvals.data
+                other_ydata = other_yvals.data
+                other_data = zip(other_xdata, other_ydata)
+                other_stripped_data = [other_xy for other_xy in other_data if ((other_xy[0] >= xdata.data[0]) and (other_xy[0] <= xdata.data[-1]))]
+                
+                if len(other_stripped_data) < 2:
+                    continue
+                
+                other_xdata, other_ydata = zip(*other_stripped_data)
+                other_xdata, other_ydata = N.array(other_xdata), N.array(other_ydata)
+
+                # Get line points from the other object
+                # It would be clearer to flip all the points once they are calculated
+                # and in the $other_pts polygon. Unfortunately, qt.QPolygonF() does not
+                # provide a method for reversing the order of the values. So their
+                # order in reversed earlier, here by using numpy.flip():
+                xplotter = other_axes[0].dataToPlotterCoords(posn, N.flip(other_xdata))
+                yplotter = other_axes[1].dataToPlotterCoords(posn, N.flip(other_ydata))
+
+                other_pts = otherDataWidget._getLinePoints(xplotter, yplotter, posn, other_xvals, other_yvals)                
+                fillPtsBetween(painter, pts, other_pts, posn, cliprect, s.FillBetween)          
 
         # draw line between points
         if not s.PlotLine.hide:
@@ -758,6 +824,11 @@ class PointPlotter(GenericPlotter):
             path.addRect(qt.QRectF(
                 qt.QPointF(x, yp), qt.QPointF(x+width, yp-height*0.45)))
             utils.brushExtFillPath(painter, s.FillAbove, path)
+        if not s.FillBetween.hide:
+            path = qt.QPainterPath()
+            path.addRect(qt.QRectF(
+                qt.QPointF(x, yp), qt.QPointF(x+width, yp-height*0.45)))
+            utils.brushExtFillPath(painter, s.FillBetween, path)
 
         # make points for error bars (if any)
         errorsize = height*0.4
@@ -939,7 +1010,7 @@ class PointPlotter(GenericPlotter):
 
             #print "Painting plot line"
             # plot data line (and/or filling above or below)
-            if not s.PlotLine.hide or not s.FillAbove.hide or not s.FillBelow.hide:
+            if not s.PlotLine.hide or not s.FillAbove.hide or not s.FillBelow.hide or not s.FillBetween.hide:#**************
                 interpolation_type = s.PlotLine.interpType
                 if interpolation_type != "linear":
                     self._drawBezierLine(
